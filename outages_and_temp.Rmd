@@ -1,0 +1,281 @@
+---
+title: "Assessing Power Outage Duration as a Function of Temperature"
+author: "Hailey Veirs"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+### Introduction
+
+Electricity is essential for many aspects of life, such as preserving food, keeping safe temperatures indoors, and powering tools and electronics (EIA, 2022). Extreme temperatures and severe weather pose threats to above ground power lines, and can cause large scale power outages. Prolonged power outages can cause harm and fatalities, in the case of extreme temperatures. As the climate changes across the U.S., temperatures and weather events will likely get more extreme, which means that the length of power outages could change. Existing research tends to focus on how to recover from power outages, and predicting risk of outages during hurricanes. Research on power outage duration often focuses on social inequalities and extreme weather events.
+
+Initially for this project, I wondered if there were more power outages associated with hot weather as compared to cold weather. However, after reading the paper "A multi-hazard approach to assess severe weather-induced major power outage risks in the U.S." by Sayanti Mukherjee et al, I saw that their raw data included the duration of their observed power outages. This made me wonder if temperature affected the duration of a power outage. The paper developed a statistical "two-stage hybrid risk estimation model" to model risk of major power outages. Notably, however, the data that they use did not contain temperature data. Instead of temperature, the data contains two variables corresponding to Oceanic El Niño/La Niña Index (ONI), a numeric variable indicating the anomaly level and a character variable categorizing these anomalies as "warm", "cold" or "normal". This seemed like a gap that I could try to fill in the research. To do so, I used temperature data from the National Oceanic and Atmospheric Administration to look at temperature's effect on power outage duration in the contiguous U.S.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+# Library
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(modelr)
+library(knitr)
+library(broom)
+library(openintro)
+library(openxlsx)
+library(magrittr)
+library(stringr)
+library(xtable)
+library(sjPlot)
+
+options(scipen = 999) # disable scientific notation
+
+rootdir <- ("/Users/hveirs/R_Files/EDS222")
+datadir <- file.path(rootdir,"data","final_data")
+```
+
+### Data Information
+
+The main data set I use in this analysis is from the paper "Data on major power outage events in the continental U.S." that is a supplement article outlining the data for "A multi-hazard approach to assess severe weather-induced major power outage risks in the U.S." The data compiled in this paper is from publicly available data sets from the U.S. Census Bureau, National Oceanic and Administrative Administration (NOAA), U.S. Energy Information Administration (EIA 826 and 861), Bureau of Economic Analysis (BEA), and NOAA's National Climatic Data Center (NCDC). The power outage data set's spatial resolution is at the state level, and includes outages from 2000 to 2016. The power outages documented in the data are "major outages", which is defined as "impacted at least 50,000 customers or caused an unplanned firm load loss of at least 300MW" by the Department of Energy. The main limitations of this dataset is that there are several instances of incorrect or missing data, as well as lack of descriptions for the meaning of the character variables. Many of the "cause_detail" strings are vague, overlap in meaning, and are not clear in what they exactly mean. I was unable to find descriptions for these variables in the metadata and the papers.
+
+The NOAA temperature data, called nClimDiv, is average monthly temperature in degrees Fahrenheit for each U.S. state starting from 1895 to 2022 (present day). The data is in a text file format through the page linked here: <https://www.ncei.noaa.gov/pub/data/cirs/climdiv/>. It was downloaded directly from the html and can be downloaded as a csv file. The average temperature was "derived from area-weighted averages of 5km X 5km grid-point estimates interpolated from station data" (NOAA). This data is unique, however there are real limitations in how accessible it is. Using the data, I felt that the meta data was difficult to use and unclear for what I wanted, average temperature. The metadata file for this dataset is included in the References section.
+
+```{r, include=FALSE}
+# First, rename the columns to clean them and add in the units where applicable
+columns <- c("id",	"year",	"month", "state",	"postal_code", "nerc_region", "climate_region", "anomaly_lvl_numeric", "climate_cate", "outage_start_mdy", "outage_start_time", "outage_restore_date", "outage_rest_time", "cause_category", "cause_detail", "hurricane_name", "outage_duration_minutes", "demand_loss_mw", "customers_affected", "res_price_cents_kwh", "com_price_cents_kwh", "ind_price_cents_kwh", "tot_price_cents_kwh", "res_sales_mwh", "com_sales_mwh", "ind_sale_mwh",	"tot_sale_mwh", "res_percent", "com_percent", "ind_percent", "res_customers", "com_customers", "ind_customers", "tot_customers", "res_cust_percent", "com_cust_percent", "ind_cust_percent", "pc_realgsp_chng_usd", "pc_realgsp_usa_usd", "pc_realgsp_rel_frac", "pc_realgsp_chng_percent", "util_realgsp_usd", "total_realgsp_usd", "util_contri_percent", "pi_util_ofusa_percent", "population", "pop_urban_percent", "pop_uc_percent", "pop_urban_density_sqmi", "pop_uc_density_sqmi", "pop_rural_density_sqmi", "area_urban_percent", "area_uc_percent", "percent_land", "percent_water_tot", "percent_water_inland")
+
+# Read in the data and clean it using the vector of column names
+outage_data <- read.xlsx(file.path(datadir, "outage.xlsx"), startRow = 7) |> 
+  subset(select = -Units) |> 
+  set_names(columns) |> # Now just remove columns that will not be used
+  subset(select = -c(outage_start_mdy:outage_rest_time, 
+                     hurricane_name, res_price_cents_kwh:pi_util_ofusa_percent))
+
+# Now we can tidy the data to make it easier to compare.
+```
+
+```{r, include=FALSE}
+# Next, we want to load in our monthly average temperature for each state over the years
+# Save the column names for cleaning the data
+climate_names <- c("state_id", "jan_degF", "feb_degF", "mar_degF", "apr_degF", 
+                   "may_degF", "jun_degF", "jul_degF", "aug_degF", "sep_degF", 
+                   "oct_degF", "nov_degF", "dec_degF")
+climate_month_id <- c("state_id", 1:12)
+clim_class <- c("character", "numeric", "numeric", "numeric", "numeric",
+                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                "numeric", "numeric", "numeric")
+
+# Then load in the txt file as a dataframe. The separators in the file are spaces.
+climate_data <- read.delim(
+  file = file.path(datadir, "climdiv-tmpcst-v1.0.0-20221104.txt"), 
+  header = FALSE, sep = " ", colClasses = clim_class) |> 
+  subset(select = -c(seq(0, 28, 2), 27)) |> # The resulting dataframe has doubled the number of columns with NA values. So I needed to remove the even columns that were mistakenly added with this function.
+  set_names(climate_month_id)
+```
+
+```{r, include=FALSE}
+# Now clean and setup the data so we can connect the state ID numbers from the climate data with the proper state names. This will allow us to join the outage data with the climate data.
+clim_df_clean <- climate_data |>
+  separate(col = state_id, into = c("state_num", "year"), sep = -4) |> # Here, I am separating the state_id column into the state ID number (first 3 numbers), and the year the average was (last 4 numbers)
+  mutate(year = as.numeric(year)) |> 
+  filter(year >= 2000)
+
+clim_state_data <- as.data.frame(unique(clim_df_clean$state_num)) |> 
+  set_names("state_id_num")
+
+state_names <- as.data.frame(state.name) |> 
+  filter(state.name != "Alaska") |> 
+  filter(state.name != "Hawaii")
+
+clim_state_data <- clim_state_data[1:48, ] |> 
+  as.data.frame() |> 
+  set_names("state_num") |> 
+  mutate(state = state_names$state.name)
+
+# Now we can join the state names with the climate data 
+climate_df <- clim_df_clean |> left_join(y = clim_state_data, by = "state_num")
+```
+
+```{r, include=FALSE}
+# Next we might want to use pivot longer to get a column of average temperature during each month in the climate data to better join it with the outage data.
+climate_df_long <- climate_df |> 
+  pivot_longer(cols = 3:14, names_to = c("month"), values_to = "avg_temp_f") |>
+  mutate(month = as.numeric(month)) |> 
+  select(-state_num)
+
+# ^^ That looks much better for the question I'm investigating.
+# Now I can join my data to make it easier to plot and analyze.
+clim_outage <- left_join(x = outage_data, 
+                         y = climate_df_long, 
+                         by = c("state", "year", "month")) |> 
+  mutate(temp_id = case_when(avg_temp_f >= 80 ~ "hot",
+                             avg_temp_f > 40 ~ "neutral", 
+                             avg_temp_f <= 40 ~ "cold")) |> 
+  mutate(is_hot = ifelse(avg_temp_f >= 57, 1, 0)) |>
+  select(-c(16:22))
+
+mean(clim_outage$avg_temp_f, na.rm = TRUE)
+
+# Finally, I will remove the cause categories and descriptions that are most obviously not related to temperature or weather. I retained the "equipment failure" category among a few other descriptions because it was unclear on an observation basis whether or not is was due to severe weather or temperatures. 
+clim_outage <- clim_outage |> filter(outage_duration_minutes <= 30000) |> 
+  filter(cause_detail != "snow/ice storm") |>
+  filter(cause_detail != "hurricanes") |> 
+  filter(cause_category != "intentional attack") |> 
+  filter(cause_category != "fuel supply emergency") |> 
+  filter(cause_category != "system operability disruption") |> 
+  filter(cause_detail != "earthquake") |> 
+  filter(cause_detail != "computer hardware")
+```
+
+### Analysis
+
+Before my analysis, I needed to clean and organize both data sets heavily. I also created another new binary variable, "is_hot", based on whether or not the average temperature value for a given outage was above 57° F. I decided to make a binary variable because I needed to do a t-test to see if there was a difference between the average outage duration for average monthly "hot" temperatures (is_hot = 1) versus average monthly "cold" temperatures (is_hot = 0). I chose 57° F because it is the mean of the average monthly temperatures of the complete joined power outage data and temperature data.
+
+Additionally, I removed a dozen outliers that had an outage duration \> 30,000 minutes, and I filtered out the cause categories and descriptions that were most obviously not related to temperature or weather. I retained the "equipment failure" cause category among a few other descriptions because it was unclear on an observation basis whether or not the cause was due to severe weather/temperatures or purely due to human or machine error.
+
+For my analysis, I started by simply creating a histogram of the average monthly temperatures present in my fully cleaned and joined outage and temperature data frame. This helped me understand the general distribution of average monthly temperatures in my data, which looks generally evenly spread. I then plotted the outage duration in minutes as a function of monthly average temperature °F. In addition to plotting this, I did a simple linear regression to see how the monthly average temperature in °F affects the power outage duration in minutes, which is shown as the blue line.
+
+```{r, message=FALSE, warning=FALSE}
+# Lets look at the variables we are interested in now in the data frame
+#ggplot(data = clim_outage, aes(x = is_hot)) + 
+#  geom_histogram(na.rm = TRUE, stat = "count") + 
+#  labs(x = "Binary: Is the average temperature above 57 F?", y = "Count", 
+#       title = "Histogram of is_hot binary variable")
+
+ggplot(data = clim_outage, aes(x = avg_temp_f)) + 
+  geom_histogram(bins = 45, na.rm = TRUE) + 
+  labs(x = "Monthly Average Temperature (Fahrenheit)", y = "Count", 
+       title = "Figure 1. Monthly Average Temperature Histogram")
+
+ggplot(data = clim_outage, aes(y = outage_duration_minutes, x = avg_temp_f)) + 
+  geom_point() + 
+  geom_smooth(method = "lm") + 
+  labs(x = "Average Temperature Per Month (Fahrenheit)", 
+       y = "Outage Duration (minutes)", 
+       title = "Figure 2. Outage Duration as affected by Average Temperature")
+```
+
+The simple linear model as shown in the Figure 2 above is summarized in the Table 1 below. The linear model predicts that when the monthly average temperature was 0° F, the power outage would last 5612.20 minutes on average. It also predicts that when the monthly average temperature increases by 1° F, the power outage duration decreases by approximately 46.54 minutes. This model had an R squared value of 0.061, which means that monthly average temperatures only accounted for ~6% of the variation in the outage duration. Due to this low R squared value, I thought to try an interaction model to see the relationship when the cause category was added, as shown in Table 2.
+
+```{r}
+# First linear model (shown in the scatter plot)
+lm_duration_temp <- lm(outage_duration_minutes ~ avg_temp_f, data = clim_outage)
+
+tab_model(lm_duration_temp,
+          pred.labels = c("Intercept", "Monthly Avg Temp (F)"),
+          dv.labels = "Outage Duration",
+          string.ci = "Conf. Int (95%)",
+          string.p = "P-value",
+          title = "Table 1. Monthly Average Temperature effect on Outage Duration Linear Model Results",
+          digits = 2)
+```
+
+
+Table 2 is the results of an interaction model between outage duration, temperature, and cause category. I thought that there is likely some relationship interaction between monthly average temperatures and the cause category being severe weather or equipment failure. This model, with the independent variables, temperature and its interaction with cause category, had an adjusted R squared value of 0.090. This means that these variables only account for 9% of the variation in outage duration. This was interesting to me, so I tried one more model for cause detail instead of category. The final model is difficult to interpret, due to the couple dozen categories the cause_detail variable could be. However, I did find that this model's R squared was 0.243, which means it accounted for almost 25% of the outage duration variability. I did not include a table of this model since it would be far too long to include. 
+
+```{r}
+interactionModel_cause <- 
+  lm(outage_duration_minutes ~ 
+       avg_temp_f + cause_category + avg_temp_f:cause_category, 
+     data = clim_outage)
+
+tab_model(interactionModel_cause,
+          pred.labels = c("Intercept", "Monthly Avg Temp (F)", "Cause Category|Severe Weather", "Avg T:Severe Weather"),
+          dv.labels = "Outage Duration",
+          string.ci = "Conf. Int (95%)",
+          string.p = "P-value",
+          title = "Table 2. Linear Interaction Model on Outage Duration",
+          digits = 2)
+```
+
+```{r, include=FALSE}
+# Code below is simply summarizing and printing the results of the linear models.
+summary(lm_duration_temp)$r.squared
+summary(interactionModel_cause)$r.squared
+
+interactionModel_cause_detail <- 
+  lm(outage_duration_minutes ~ 
+       avg_temp_f + cause_detail + avg_temp_f:cause_detail, 
+     data = clim_outage)
+summary(interactionModel_cause_detail)$r.squared
+```
+
+Finally, I wanted to do a two sample t-test using my is_hot binary variable. The results are shown below in Table 3. My null hypothesis is that there is no difference in the means of the outage duration when is_hot = 1 (monthly average temperatures above 57° F) versus when is_hot = 0 (monthly average temperatures below 57° F). My alternative hypothesis is that there is a difference in the means of the outage duration when is_hot = 1 versus when is_hot = 0. My t-test had a Z value of -4.79, and a p-value of below 0.0001. The test is 95% confident that the interval (-2048.0124, -856.3965) contains the true difference in means (the Estimate column). This means that I can reject my null hypothesis, and this was statistically significant as my p-value is greater than an alpha of 0.05.
+
+```{r, warning=FALSE}
+# T-test: 
+# H0 = there is no difference between the average temperatures
+
+ttest_hotvcold <- t.test(
+  clim_outage$outage_duration_minutes[clim_outage$is_hot == 1], 
+  clim_outage$outage_duration_minutes[clim_outage$is_hot == 0])
+
+tab_model(ttest_hotvcold,
+          string.ci = "Conf. Int (95%)",
+          string.p = "P-value",
+          dv.labels = "Outage Duration",
+          pred.labels = "Is_Hot",
+          title = "Table 3. Is_hot binary Welch Two Sample T-test",
+          digits = 2)
+```
+
+### Results and Final Thoughts
+
+Overall, I found some interesting relationships and statistics in my analysis. The two linear models I show above were relatively uninteresting, however I think it would be beneficial to further investigate the relationships between outage duration, temperature, and the exact cause (cause_detail). The exact event seems to have larger control over the outage duration than temperature alone. I would have investigated this, however it was very difficult due to the lack of thorough descriptions of the causes. Some of these detail categories seemed like they could easily overlap or work in tandem with one another. 
+
+Additionally, this type of research may benefit from data at a smaller spatial scale, as there are many brownouts and power outages that may not have been added to this set because they simply did not affect more than 50,000 people. I also think it would be beneficial to look more at the frequency of these outages over time, to better see when and where they will occur as the climate changes. 
+
+```{r, include = FALSE}
+# This section was just trying to look at how my temperature data compares to the listed outage causes. I wanted to see if temperatures were visually consistent with the reported cause (such as higher average temperature with heat waves and such)
+cold_weather <- nrow(filter(clim_outage, cause_detail == "winter", 
+                            avg_temp_f < 60)) + 
+  nrow(filter(clim_outage, cause_detail == "winter storm", 
+                            avg_temp_f < 60)) + 
+  nrow(filter(clim_outage, cause_detail == "snow/ice storm", 
+                            avg_temp_f < 60)) + 
+  nrow(filter(clim_outage, cause_detail == "snow/ice", 
+                            avg_temp_f < 60)) + 
+  nrow(filter(clim_outage, cause_detail == "hailstorm", 
+                            avg_temp_f < 60)) + 
+  nrow(filter(clim_outage, cause_detail == "wind storm", 
+                            avg_temp_f < 60)) + 
+  nrow(filter(clim_outage, cause_detail == "flooding", 
+                            avg_temp_f < 60)) 
+  
+
+warm_weather <- nrow(filter(clim_outage, cause_detail == "heatwave", 
+                            avg_temp_f >= 60)) + 
+  nrow(filter(clim_outage, cause_detail == "thunderstorm", 
+                            avg_temp_f >= 60)) + 
+  nrow(filter(clim_outage, cause_detail == "tornadoes", 
+                            avg_temp_f >= 60)) + 
+  nrow(filter(clim_outage, cause_detail == "hurricanes", 
+                            avg_temp_f >= 60)) + 
+  nrow(filter(clim_outage, cause_detail == "wildfire", 
+                            avg_temp_f >= 60)) + 
+  nrow(filter(clim_outage, cause_detail == "lightning", 
+                            avg_temp_f >= 60)) + 
+  nrow(filter(clim_outage, cause_detail == "failure", 
+                            avg_temp_f >= 60))
+```
+
+### References
+
+Mukherjee, Sayanti, et al. "A Multi-Hazard Approach to Assess Severe Weather-Induced Major Power Outage Risks in the U.S." *Reliability Engineering & System Safety*, vol. 175, 2018, pp. 283--305., <https://doi.org/10.1016/j.ress.2018.03.015>.
+
+Mukherjee, Sayanti, et al. "Data on Major Power Outage Events in the Continental U.S." *Data in Brief,* vol. 19, 2018, pp. 2079--2083., <https://doi.org/10.1016/j.dib.2018.06.067>.
+
+Vose, Russell S.; Applequist, Scott; Squires, Mike; Durre, Imke; Menne, Matthew J.; Williams, Claude N., Jr.; Fenimore, Chris; Gleason, Karin; Arndt, Derek (2014): NOAA Monthly U.S. Climate Divisional Database (NClimDiv). climdiv-tmpcst-v1.0.0-20221104. NOAA National Climatic Data Center. <doi:10.7289/V5M32STR> . <https://www.ncei.noaa.gov/access/monitoring/dyk/us-climate-divisions>
+
+-   NOAA Average Temperature data downloaded from this page: <https://www.ncei.noaa.gov/pub/data/cirs/climdiv/>
+
+-   Specific file downloaded was climdiv-tmpcst-v1.0.0-20221104 downloaded as a csv file. Metadata/background for this file is in this readme file: <https://www.ncei.noaa.gov/pub/data/cirs/climdiv/state-readme.txt>
+
+U.S. Energy Information Administration. "Electricity Explained: Use of Electricity." Use of Electricity - U.S. Energy Information Administration (EIA), Updated 3 May 2022, <https://www.eia.gov/energyexplained/electricity/use-of-electricity.php#:~:text=Electricity%20is%20an%20essential%20part,machinery%2C%20and%20public%20transportation%20systems.>
